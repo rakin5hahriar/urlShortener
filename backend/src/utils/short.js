@@ -1,4 +1,5 @@
 const { nanoid } = require('nanoid');
+const validator = require('validator');
 const Url = require('../models/Url');
 
 /**
@@ -6,33 +7,31 @@ const Url = require('../models/Url');
  * @param {number} length - Length of the short code
  * @returns {Promise<string>} - Unique short code
  */
-const generateShortCode = async (length = 6) => {
-  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+const generateShortCode = async (length = 8) => {
   let shortCode;
-  let isUnique = false;
   let attempts = 0;
   const maxAttempts = 10;
 
-  while (!isUnique && attempts < maxAttempts) {
-    shortCode = nanoid(length).replace(/[_-]/g, () => 
-      alphabet[Math.floor(Math.random() * alphabet.length)]
-    );
+  do {
+    shortCode = nanoid(length);
+    attempts++;
+    
+    if (attempts >= maxAttempts) {
+      throw new Error('Failed to generate unique short code');
+    }
     
     // Check if this short code already exists
-    const existingUrl = await Url.findOne({ shortCode });
+    const existingUrl = await Url.findOne({
+      $or: [
+        { shortCode },
+        { customAlias: shortCode }
+      ]
+    });
+    
     if (!existingUrl) {
-      isUnique = true;
-    } else {
-      attempts++;
-      if (attempts < maxAttempts) {
-        length++; // Increase length if collision occurs
-      }
+      break;
     }
-  }
-
-  if (!isUnique) {
-    throw new Error('Unable to generate unique short code');
-  }
+  } while (true);
 
   return shortCode;
 };
@@ -43,12 +42,9 @@ const generateShortCode = async (length = 6) => {
  * @returns {Promise<boolean>} - Whether the alias is valid and available
  */
 const validateCustomAlias = async (alias) => {
-  if (!alias) return true; // Optional field
-
   // Check format
-  const aliasRegex = /^[a-zA-Z0-9_-]+$/;
-  if (!aliasRegex.test(alias)) {
-    throw new Error('Custom alias can only contain letters, numbers, hyphens, and underscores');
+  if (!alias || typeof alias !== 'string') {
+    throw new Error('Custom alias is required');
   }
 
   // Check length
@@ -60,8 +56,31 @@ const validateCustomAlias = async (alias) => {
     throw new Error('Custom alias cannot exceed 50 characters');
   }
 
-  // Check if already exists
-  const existingUrl = await Url.findOne({ 
+  // Check pattern
+  const validPattern = /^[a-zA-Z0-9_-]+$/;
+  if (!validPattern.test(alias)) {
+    throw new Error('Custom alias can only contain letters, numbers, hyphens, and underscores');
+  }
+
+  // Check for reserved words
+  const reservedWords = [
+    'api', 'www', 'admin', 'root', 'user', 'app', 'dashboard', 'login', 'register',
+    'signup', 'signin', 'logout', 'profile', 'settings', 'help', 'support', 'about',
+    'contact', 'terms', 'privacy', 'legal', 'blog', 'news', 'home', 'index',
+    'analytics', 'stats', 'reports', 'manage', 'create', 'edit', 'delete', 'remove',
+    'add', 'new', 'update', 'view', 'preview', 'download', 'upload', 'share',
+    'public', 'private', 'internal', 'external', 'test', 'demo', 'dev', 'prod',
+    'staging', 'beta', 'alpha', 'v1', 'v2', 'version', 'health', 'status',
+    'ping', 'robots', 'sitemap', 'favicon', 'asset', 'assets', 'static', 'css',
+    'js', 'img', 'image', 'images', 'file', 'files', 'docs', 'doc', 'pdf'
+  ];
+
+  if (reservedWords.includes(alias.toLowerCase())) {
+    throw new Error('This alias is reserved and cannot be used');
+  }
+
+  // Check availability in database
+  const existingUrl = await Url.findOne({
     $or: [
       { shortCode: alias },
       { customAlias: alias }
@@ -70,18 +89,6 @@ const validateCustomAlias = async (alias) => {
 
   if (existingUrl) {
     throw new Error('This alias is already taken');
-  }
-
-  // Check against reserved words
-  const reservedWords = [
-    'api', 'admin', 'www', 'mail', 'ftp', 'localhost',
-    'dashboard', 'analytics', 'auth', 'login', 'register',
-    'about', 'contact', 'help', 'support', 'terms', 'privacy',
-    'health', 'status', 'docs', 'documentation'
-  ];
-
-  if (reservedWords.includes(alias.toLowerCase())) {
-    throw new Error('This alias is reserved and cannot be used');
   }
 
   return true;
@@ -93,17 +100,18 @@ const validateCustomAlias = async (alias) => {
  * @returns {string} - Normalized URL
  */
 const normalizeUrl = (url) => {
-  if (!url) return url;
-
-  // Remove whitespace
-  url = url.trim();
-
-  // Add protocol if missing
-  if (!/^https?:\/\//i.test(url)) {
-    url = `https://${url}`;
+  if (!url || typeof url !== 'string') {
+    return url;
   }
 
-  return url;
+  let normalizedUrl = url.trim();
+
+  // Add protocol if missing
+  if (!/^https?:\/\//i.test(normalizedUrl)) {
+    normalizedUrl = 'https://' + normalizedUrl;
+  }
+
+  return normalizedUrl;
 };
 
 /**
@@ -112,9 +120,22 @@ const normalizeUrl = (url) => {
  * @returns {boolean} - Whether the URL is valid
  */
 const isValidUrl = (url) => {
+  if (!url || typeof url !== 'string') {
+    return false;
+  }
+
   try {
-    const urlObj = new URL(url);
-    return ['http:', 'https:'].includes(urlObj.protocol);
+    // Use validator.js for URL validation
+    return validator.isURL(url, {
+      protocols: ['http', 'https'],
+      require_protocol: true,
+      require_host: true,
+      require_valid_protocol: true,
+      allow_underscores: false,
+      allow_trailing_dot: false,
+      allow_protocol_relative_urls: false,
+      disallow_auth: false
+    });
   } catch (error) {
     return false;
   }
@@ -128,21 +149,34 @@ const isValidUrl = (url) => {
 const extractDomain = (url) => {
   try {
     const urlObj = new URL(url);
-    return urlObj.hostname;
+    return urlObj.hostname.replace(/^www\./, '');
   } catch (error) {
     return 'Unknown';
   }
 };
 
 /**
- * Generate QR code data URL
+ * Generate QR code URL for a given URL
  * @param {string} url - URL to generate QR code for
- * @returns {string} - QR code data URL
+ * @returns {Promise<string>} - QR code image URL
  */
 const generateQRCode = async (url) => {
-  // This would typically use a QR code library like 'qrcode'
-  // For now, returning a placeholder
-  return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}`;
+  if (!url) {
+    return null;
+  }
+
+  // Using QR Server API as a simple solution
+  const encodedUrl = encodeURIComponent(url);
+  return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodedUrl}`;
+};
+
+module.exports = {
+  generateShortCode,
+  validateCustomAlias,
+  normalizeUrl,
+  isValidUrl,
+  extractDomain,
+  generateQRCode
 };
 
 module.exports = {
